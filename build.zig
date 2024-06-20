@@ -16,8 +16,7 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const download_url = b.option([]const u8, "force-slang-release", "Force a specific release by providing a zip download URL from https://github.com/shader-slang/slang/releases/");
-    _ = download_url; // autofix
+    const download_url = b.option([]const u8, "slang-override-download", "Force a specific release by providing a zip download URL from https://github.com/shader-slang/slang/releases/");
 
     const mod = b.addModule("slang", .{
         .root_source_file = b.path("src/root.zig"),
@@ -35,7 +34,9 @@ pub fn build(b: *std.Build) !void {
     var download_step = DownloadBinaryStep.init(
         b,
         exe,
-        Options{},
+        Options{
+            .download_url = download_url,
+        },
     );
     exe.step.dependOn(&download_step.step);
     exe.root_module.addImport("slang", mod);
@@ -107,7 +108,14 @@ pub const DownloadBinaryStep = struct {
             };
         }
 
-        const linkable_path = cache_dir.readFileAlloc(allocator, download_step.options.release_version, std.math.maxInt(usize)) catch blk: {
+        const target = download_step.target.rootModuleTarget();
+        const cache_file_name = download_step.b.fmt("{s}-{s}-{s}", .{
+            download_step.options.release_version,
+            @tagName(target.os.tag),
+            @tagName(target.cpu.arch),
+        });
+
+        const linkable_path = cache_dir.readFileAlloc(allocator, cache_file_name, std.math.maxInt(usize)) catch blk: {
             const path_with_binaries = try downloadFromBinary(
                 download_step.b,
                 download_step.target,
@@ -117,7 +125,7 @@ pub const DownloadBinaryStep = struct {
             );
 
             try cache_dir.writeFile(.{
-                .sub_path = download_step.options.release_version,
+                .sub_path = cache_file_name,
                 .data = path_with_binaries,
             });
 
@@ -168,7 +176,37 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
     };
     try std.http.Client.initDefaultProxies(&client, b.allocator);
 
-    const download_url = if (options.download_url != null) options.download_url.? else blk: {
+    const archive_extension = ".zip";
+    const slang_os_arch_combo: []const u8 = switch (target.os.tag) {
+        .windows => switch (target.cpu.arch) {
+            .x86_64 => "win64",
+            .x86 => "win32",
+            .aarch64 => "win-arm64",
+            else => return error.UnsupportedTarget,
+        },
+        .macos => switch (target.cpu.arch) {
+            .x86_64 => "macos-x64",
+            .aarch64 => "macos-aarch64",
+            else => return error.UnsupportedTarget,
+        },
+        .linux => switch (target.cpu.arch) {
+            .x86_64 => "linux-x86_64",
+            .aarch64 => "linux-aarch64",
+            else => return error.UnsupportedTarget,
+        },
+        else => return error.UnsupportedTarget,
+    };
+
+    const download_url, const archive_name = if (options.download_url != null) blk: {
+        break :blk .{
+            options.download_url.?,
+            b.fmt("slang-{s}-{s}{s}", .{
+                options.release_version,
+                slang_os_arch_combo,
+                archive_extension,
+            }),
+        };
+    } else blk: {
         var body = std.ArrayList(u8).init(b.allocator);
         var server_header_buffer: [16 * 1024]u8 = undefined;
 
@@ -202,26 +240,26 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
         };
         std.debug.assert(release.name[0] == 'v');
 
+        const tar_name = b.fmt("slang-{s}-{s}{s}", .{
+            release.name[1..],
+            slang_os_arch_combo,
+            archive_extension,
+        });
+
         for (release.assets) |asset| {
-            const tar_name = b.fmt("slang-{s}-{s}-{s}.zip", .{
-                release.name[1..],
-                @tagName(target.os.tag),
-                // slang is naming the triplet different for macos smh..
-                if (target.os.tag == .macos and target.cpu.arch == .x86_64) "x64" else @tagName(target.cpu.arch),
-            });
             if (std.mem.endsWith(u8, asset.name, tar_name)) {
-                // log.debug("found asset: {s}", .{asset.name});
-                break :blk asset.browser_download_url;
+                break :blk .{ asset.browser_download_url, asset.name };
             }
         }
 
+        log.err("Failed to find slang release for: {s}", .{tar_name});
         return error.FailedToFindSlangRelease;
     };
 
     std.debug.assert(b.cache_root.path != null);
 
     // download zip release file
-    const zip_file_path = blk: {
+    {
         var body = std.ArrayList(u8).init(b.allocator);
         const response = try client.fetch(.{
             .method = .GET,
@@ -236,22 +274,19 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
             return error.FailedToDownloadSlangRelease;
         }
 
-        const zip_path = "slang.zip";
-        const target_file = try cache_dir.createFile(zip_path, .{});
+        const target_file = try cache_dir.createFile(archive_name, .{});
         defer target_file.close();
 
         try target_file.writeAll(body.items);
         node.completeOne();
-
-        break :blk zip_path;
-    };
+    }
 
     // unzip the just downloaded zip file to a directory
-    var file = try cache_dir.openFile(zip_file_path, .{ .mode = .read_only });
+    var file = try cache_dir.openFile(archive_name, .{ .mode = .read_only });
     defer file.close();
-    defer cache_dir.deleteFile(zip_file_path) catch unreachable;
+    defer cache_dir.deleteFile(archive_name) catch unreachable;
 
-    const extract_dir_name = "slang";
+    const extract_dir_name = try std.mem.replaceOwned(u8, b.allocator, archive_name, archive_extension, "");
     try cache_dir.makePath(extract_dir_name);
 
     var extract_dir = try cache_dir.openDir(extract_dir_name, .{
