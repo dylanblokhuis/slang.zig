@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.slang);
 
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
@@ -34,9 +35,7 @@ pub fn build(b: *std.Build) !void {
     var download_step = DownloadBinaryStep.init(
         b,
         exe,
-        Options{
-            .download_url = "https://github.com/shader-slang/slang/releases/download/v2024.1.22/slang-2024.1.22-macos-x64.zip",
-        },
+        Options{},
     );
     exe.step.dependOn(&download_step.step);
     exe.root_module.addImport("slang", mod);
@@ -65,35 +64,11 @@ pub fn build(b: *std.Build) !void {
     // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
-
-    // // Creates a step for unit testing. This only builds the test executable
-    // // but does not run it.
-    // const lib_unit_tests = b.addTest(.{
-    //     .root_source_file = b.path("src/root.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-
-    // const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    // const exe_unit_tests = b.addTest(.{
-    //     .root_source_file = b.path("src/main.zig"),
-    //     .target = target,
-    //     .optimize = optimize,
-    // });
-
-    // const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    // // Similar to creating the run step earlier, this exposes a `test` step to
-    // // the `zig build --help` menu, providing a way for the user to request
-    // // running the unit tests.
-    // const test_step = b.step("test", "Run unit tests");
-    // test_step.dependOn(&run_lib_unit_tests.step);
-    // test_step.dependOn(&run_exe_unit_tests.step);
 }
 
 pub const Options = struct {
-    download_url: ?[]const u8,
+    release_version: []const u8 = "160229789",
+    download_url: ?[]const u8 = null,
 };
 pub const DownloadBinaryStep = struct {
     target: *std.Build.Step.Compile,
@@ -119,14 +94,40 @@ pub const DownloadBinaryStep = struct {
 
     fn make(step: *std.Build.Step, prog_node: std.Progress.Node) anyerror!void {
         const download_step: *DownloadBinaryStep = @fieldParentPtr("step", step);
-        const path_with_binaries = try downloadFromBinary(
-            download_step.b,
-            download_step.target,
-            download_step.options,
-            prog_node.start("Downloading release and extracting", 2),
-        );
+        const allocator = download_step.b.allocator;
+
+        const cache_dir_path = try std.fs.path.join(allocator, &.{ download_step.b.cache_root.path.?, "slang-release" });
+        try std.fs.cwd().makePath(cache_dir_path);
+        var cache_dir = try std.fs.openDirAbsolute(cache_dir_path, .{});
+        defer cache_dir.close();
+        errdefer {
+            log.err("Cleaning up...", .{});
+            std.fs.deleteTreeAbsolute(cache_dir_path) catch |err| {
+                log.err("Failed to cleanup cache dir: {}", .{err});
+            };
+        }
+
+        const linkable_path = cache_dir.readFileAlloc(allocator, download_step.options.release_version, std.math.maxInt(usize)) catch blk: {
+            const path_with_binaries = try downloadFromBinary(
+                download_step.b,
+                download_step.target,
+                download_step.options,
+                prog_node.start("Downloading release and extracting", 2),
+                cache_dir,
+            );
+
+            try cache_dir.writeFile(.{
+                .sub_path = download_step.options.release_version,
+                .data = path_with_binaries,
+            });
+
+            break :blk path_with_binaries;
+        };
+
+        std.debug.assert(linkable_path.len > 0);
+
         download_step.target.addLibraryPath(.{
-            .cwd_relative = path_with_binaries,
+            .cwd_relative = linkable_path,
         });
     }
 };
@@ -155,7 +156,7 @@ const GithubReleaseAsset = struct {
 
 var download_mutex = std.Thread.Mutex{};
 
-pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options: Options, node: std.Progress.Node) ![]const u8 {
+pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options: Options, node: std.Progress.Node, cache_dir: std.fs.Dir) ![]const u8 {
     // This function could be called in parallel. We're manipulating the FS here
     // and so need to prevent that.
     download_mutex.lock();
@@ -170,10 +171,12 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
     const download_url = if (options.download_url != null) options.download_url.? else blk: {
         var body = std.ArrayList(u8).init(b.allocator);
         var server_header_buffer: [16 * 1024]u8 = undefined;
+
+        const url = b.fmt("https://api.github.com/repos/shader-slang/slang/releases/{s}", .{options.release_version});
         const req = try client.fetch(.{
             .server_header_buffer = &server_header_buffer,
             .method = .GET,
-            .location = .{ .url = "https://api.github.com/repos/shader-slang/slang/releases/latest" },
+            .location = .{ .url = url },
             .response_storage = .{
                 .dynamic = &body,
             },
@@ -182,19 +185,19 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
             var iter = std.http.HeaderIterator.init(&server_header_buffer);
             while (iter.next()) |header| {
                 if (std.mem.eql(u8, header.name, "X-RateLimit-Remaining") and std.mem.eql(u8, header.value, "0")) {
-                    std.log.err("Github API rate limit exceeded, wait 30 minutes\n", .{});
+                    log.err("Github API rate limit exceeded, wait 30 minutes", .{});
                     return error.GithubApiRateLimitExceeded;
                 }
             }
 
-            std.log.err("Failed to fetch slang releases: {}\n", .{req.status});
+            log.err("Failed to fetch slang releases: {}", .{req.status});
             return error.FailedToFetchGithubReleases;
         }
 
         const release = std.json.parseFromSliceLeaky(GithubReleaseItem, b.allocator, body.items, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            std.log.err("Failed to parse slang release JSON: {}\n", .{err});
+            log.err("Failed to parse slang release JSON: {}", .{err});
             return error.FailedToParseGithubReleaseJson;
         };
         std.debug.assert(release.name[0] == 'v');
@@ -207,7 +210,7 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
                 if (target.os.tag == .macos and target.cpu.arch == .x86_64) "x64" else @tagName(target.cpu.arch),
             });
             if (std.mem.endsWith(u8, asset.name, tar_name)) {
-                std.log.info("found asset: {s}\n", .{asset.name});
+                // log.debug("found asset: {s}", .{asset.name});
                 break :blk asset.browser_download_url;
             }
         }
@@ -217,12 +220,8 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
 
     std.debug.assert(b.cache_root.path != null);
 
-    const cache_dir = try std.fs.path.join(b.allocator, &.{ b.cache_root.path.?, "slang-release" });
-    try std.fs.cwd().makePath(cache_dir);
-
     // download zip release file
     const zip_file_path = blk: {
-        const zip_path = try std.fs.path.join(b.allocator, &.{ cache_dir, "slang.zip" });
         var body = std.ArrayList(u8).init(b.allocator);
         const response = try client.fetch(.{
             .method = .GET,
@@ -233,12 +232,14 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
             .max_append_size = 50 * 1024 * 1024,
         });
         if (response.status != .ok) {
-            std.log.err("Failed to download slang release: {}\n", .{response.status});
+            log.err("Failed to download slang release: {}", .{response.status});
             return error.FailedToDownloadSlangRelease;
         }
 
-        const target_file = try std.fs.cwd().createFile(zip_path, .{});
+        const zip_path = "slang.zip";
+        const target_file = try cache_dir.createFile(zip_path, .{});
         defer target_file.close();
+
         try target_file.writeAll(body.items);
         node.completeOne();
 
@@ -246,43 +247,37 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
     };
 
     // unzip the just downloaded zip file to a directory
-    const extracted_dir_path = blk: {
-        var file = try std.fs.openFileAbsolute(zip_file_path, .{ .mode = .read_only });
-        defer file.close();
+    var file = try cache_dir.openFile(zip_file_path, .{ .mode = .read_only });
+    defer file.close();
+    defer cache_dir.deleteFile(zip_file_path) catch unreachable;
 
-        const extract_dir_path = try std.fs.path.join(b.allocator, &.{ cache_dir, "slang" });
-        try std.fs.cwd().makePath(extract_dir_path);
+    const extract_dir_name = "slang";
+    try cache_dir.makePath(extract_dir_name);
 
-        var extract_dir = try std.fs.openDirAbsolute(extract_dir_path, .{});
-        defer extract_dir.close();
+    var extract_dir = try cache_dir.openDir(extract_dir_name, .{
+        .iterate = true,
+    });
+    defer extract_dir.close();
 
-        try std.zip.extract(extract_dir, file.seekableStream(), .{});
+    try std.zip.extract(extract_dir, file.seekableStream(), .{});
+
+    // we try and find a folder called "release" in the extracted files
+    // in the slang releases this is where the binaries are stored
+    var iter = try extract_dir.walk(b.allocator);
+    defer iter.deinit();
+
+    var maybe_release_dir_path: ?[]const u8 = null;
+    while (try iter.next()) |entry| {
+        if (entry.kind == .directory and std.mem.eql(u8, entry.basename, "release")) {
+            maybe_release_dir_path = try entry.dir.realpathAlloc(b.allocator, entry.basename);
+            break;
+        }
+    }
+
+    if (maybe_release_dir_path) |path| {
         node.completeOne();
-        break :blk extract_dir_path;
-    };
+        return path;
+    }
 
-    const dir_with_binaries = blk: {
-        const dir = try std.fs.cwd().openDir(extracted_dir_path, .{
-            .iterate = true,
-        });
-
-        var iter = try dir.walk(b.allocator);
-        defer iter.deinit();
-
-        var release_dir_path: ?[]const u8 = null;
-        while (try iter.next()) |entry| {
-            if (entry.kind == .directory and std.mem.eql(u8, entry.basename, "release")) {
-                release_dir_path = try std.fs.path.join(b.allocator, &.{ extracted_dir_path, entry.path });
-                break;
-            }
-        }
-
-        if (release_dir_path == null) {
-            return error.FailedToFindSlangReleaseDir;
-        }
-
-        break :blk release_dir_path.?;
-    };
-
-    return dir_with_binaries;
+    return error.FailedToFindSlangReleaseDir;
 }
