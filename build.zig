@@ -26,11 +26,14 @@ pub fn build(b: *std.Build) !void {
     mod.linkSystemLibrary("slang", .{});
 
     const exe = b.addExecutable(.{
-        .name = "slang.zig",
+        .name = "slang",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
+    exe.linkLibC();
+    exe.linkLibCpp();
+
     var download_step = DownloadBinaryStep.init(
         b,
         exe,
@@ -84,7 +87,7 @@ pub const DownloadBinaryStep = struct {
             .options = options,
             .step = std.Build.Step.init(.{
                 .id = .custom,
-                .name = "download",
+                .name = "slang-download",
                 .owner = b,
                 .makeFn = &make,
             }),
