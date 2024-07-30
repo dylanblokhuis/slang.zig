@@ -8,7 +8,6 @@ pub fn main() !void {
 
     const req = slang.spCreateCompileRequest(session);
     defer slang.spDestroyCompileRequest(req);
-
     const profile_id = slang.spFindProfile(session, "spirv_1_5");
 
     const index = slang.spAddCodeGenTarget(req, .SLANG_SPIRV);

@@ -24,15 +24,16 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
     mod.linkSystemLibrary("slang", .{});
+    mod.link_libc = true;
+    mod.link_libcpp = true;
 
+    // example usage
     const exe = b.addExecutable(.{
         .name = "slang",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    exe.linkLibC();
-    exe.linkLibCpp();
 
     var download_step = DownloadBinaryStep.init(
         b,
@@ -71,7 +72,7 @@ pub fn build(b: *std.Build) !void {
 }
 
 pub const Options = struct {
-    release_version: []const u8 = "160229789",
+    release_version: []const u8 = "167021889",
     download_url: ?[]const u8 = null,
 };
 pub const DownloadBinaryStep = struct {
@@ -301,21 +302,10 @@ pub fn downloadFromBinary(b: *std.Build, step: *std.Build.Step.Compile, options:
 
     // we try and find a folder called "release" in the extracted files
     // in the slang releases this is where the binaries are stored
-    var iter = try extract_dir.walk(b.allocator);
-    defer iter.deinit();
+    // if (maybe_release_dir_path) |path| {
+    node.completeOne();
+    return try extract_dir.realpathAlloc(b.allocator, "lib");
+    // }
 
-    var maybe_release_dir_path: ?[]const u8 = null;
-    while (try iter.next()) |entry| {
-        if (entry.kind == .directory and std.mem.eql(u8, entry.basename, "release")) {
-            maybe_release_dir_path = try entry.dir.realpathAlloc(b.allocator, entry.basename);
-            break;
-        }
-    }
-
-    if (maybe_release_dir_path) |path| {
-        node.completeOne();
-        return path;
-    }
-
-    return error.FailedToFindSlangReleaseDir;
+    // return error.FailedToFindSlangReleaseDir;
 }

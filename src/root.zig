@@ -1,7 +1,7 @@
 //  Severity | Facility | Code
 //     ---------|----------|-----
 //     31       |    30-16 | 15-0
-const SlangResult = packed struct(c_int) {
+pub const SlangResult = packed struct(c_int) {
     severity: u1,
     facility: u15,
     code: u16,
@@ -21,18 +21,18 @@ const SlangResult = packed struct(c_int) {
         return self.code;
     }
 };
-const SlangUInt32 = c_uint;
-const SlangInt32 = c_int;
-const SlangInt = c_int;
-const SlangUInt = c_uint;
-const SlangSSizeT = c_int;
-const SlangSizeT = c_uint;
-const SlangBool = bool;
-const SlangSession = opaque {};
-const SlangCompileRequest = opaque {};
-const SlangProfileID = c_uint;
+pub const SlangUInt32 = c_uint;
+pub const SlangInt32 = c_int;
+pub const SlangInt = c_int;
+pub const SlangUInt = c_uint;
+pub const SlangSSizeT = c_int;
+pub const SlangSizeT = c_uint;
+pub const SlangBool = bool;
+pub const SlangSession = opaque {};
+pub const SlangCompileRequest = opaque {};
+pub const SlangProfileID = c_uint;
 
-const SlangCompileTarget = enum(c_int) {
+pub const SlangCompileTarget = enum(c_int) {
     SLANG_TARGET_UNKNOWN,
     SLANG_TARGET_NONE,
     SLANG_GLSL,
@@ -64,7 +64,7 @@ const SlangCompileTarget = enum(c_int) {
     SLANG_TARGET_COUNT_OF,
 };
 
-const SlangTargetFlags = enum(c_uint) {
+pub const SlangTargetFlags = enum(c_uint) {
     // When compiling for a D3D Shader Model 5.1 or higher target, allocate
     //   distinct register spaces for parameter blocks.
     //
@@ -83,7 +83,7 @@ const SlangTargetFlags = enum(c_uint) {
     SLANG_TARGET_FLAG_GENERATE_SPIRV_DIRECTLY = 1 << 10,
 };
 
-const ShaderCompileFlags = enum(c_uint) {
+pub const ShaderCompileFlags = enum(c_uint) {
     // Do as little mangling of names as possible, to try to preserve original names
     SLANG_COMPILE_FLAG_NO_MANGLING = 1 << 3,
 
@@ -100,7 +100,7 @@ const ShaderCompileFlags = enum(c_uint) {
     SLANG_COMPILE_FLAG_SPLIT_MIXED_TYPES = 0,
 };
 
-const SlangSourceLanguage = enum(c_int) {
+pub const SlangSourceLanguage = enum(c_int) {
     SLANG_SOURCE_LANGUAGE_UNKNOWN,
     SLANG_SOURCE_LANGUAGE_SLANG,
     SLANG_SOURCE_LANGUAGE_HLSL,
@@ -113,7 +113,7 @@ const SlangSourceLanguage = enum(c_int) {
     SLANG_SOURCE_LANGUAGE_COUNT_OF,
 };
 
-const SlangStage = enum(SlangUInt32) {
+pub const SlangStage = enum(SlangUInt32) {
     SLANG_STAGE_NONE,
     SLANG_STAGE_VERTEX,
     SLANG_STAGE_HULL,
